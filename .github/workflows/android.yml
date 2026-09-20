@@ -1,0 +1,59 @@
+name: PHONK ZETA - Android APK + diagnostico
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extraer ZIP si el repo contiene solo un ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f settings.gradle.kts ]; then
+            echo "APP_ROOT=." >> "$GITHUB_ENV"
+          else
+            ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+            if [ -z "$ZIP" ]; then echo 'Falta settings.gradle.kts o un ZIP de fuentes'; exit 1; fi
+            mkdir -p extracted
+            unzip -q "$ZIP" -d extracted
+            ROOT="$(find extracted -maxdepth 4 -name settings.gradle.kts -printf '%h\n' | head -1)"
+            if [ -z "$ROOT" ]; then echo 'ZIP no contiene proyecto Android válido'; exit 1; fi
+            echo "APP_ROOT=$ROOT" >> "$GITHUB_ENV"
+          fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Diagnosticar en masa, probar y generar APK
+        shell: bash
+        run: |
+          set -o pipefail
+          cd "$APP_ROOT"
+          gradle --no-daemon --continue --stacktrace :app:testDebugUnitTest :app:lintDebug :app:assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build-completo.log"
+      - name: Guardar APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PHONK-ZETA-v0.2.0-APK
+          path: ${{ env.APP_ROOT }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+      - name: Guardar diagnosticos y reportes incluso al fallar
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PHONK-ZETA-diagnostico-completo
+          path: |
+            build-completo.log
+            ${{ env.APP_ROOT }}/app/build/reports/**
+            ${{ env.APP_ROOT }}/app/build/test-results/**
+          if-no-files-found: ignore
