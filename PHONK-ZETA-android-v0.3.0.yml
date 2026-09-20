@@ -1,0 +1,136 @@
+name: PHONK ZETA - Compilar APK y diagnosticar
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Buscar y extraer proyecto Android del ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f settings.gradle.kts ]; then
+            echo 'APP_ROOT=.' >> "$GITHUB_ENV"
+          else
+            ZIP="$(find . -maxdepth 2 -type f -iname '*PHONK-ZETA-source-v0.3.0*.zip' -print -quit)"
+            if [ -z "$ZIP" ]; then
+              ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+            fi
+            if [ -z "$ZIP" ]; then
+              echo 'ERROR: Sube el ZIP del proyecto o su contenido extraido.'
+              exit 1
+            fi
+            mkdir -p extracted
+            unzip -q "$ZIP" -d extracted
+            ROOT="$(find extracted -maxdepth 5 -name settings.gradle.kts -printf '%h\n' | head -1)"
+            if [ -z "$ROOT" ]; then
+              echo 'ERROR: No se encontro settings.gradle.kts en el ZIP.'
+              exit 1
+            fi
+            echo "APP_ROOT=$ROOT" >> "$GITHUB_ENV"
+          fi
+
+      - name: Corregir coordenadas de Compose Material 3 y validar dependencias
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_FILE="$APP_ROOT/app/build.gradle.kts"
+          test -f "$BUILD_FILE" || { echo 'ERROR: app/build.gradle.kts no existe.'; exit 1; }
+          # Compatible con el ZIP v0.2.1 ya subido al repositorio.
+          sed -i 's/androidx\.compose\.material:material3/androidx.compose.material3:material3/g' "$BUILD_FILE"
+          if ! grep -Fq 'androidx.compose.material3:material3' "$BUILD_FILE"; then
+            echo 'ERROR: No se encontró la dependencia Material 3 corregida.'
+            exit 1
+          fi
+          if grep -Fq 'androidx.compose.material:material3' "$BUILD_FILE"; then
+            echo 'ERROR: Sigue presente la dependencia incorrecta Material 3.'
+            exit 1
+          fi
+          echo 'OK: androidx.compose.material3:material3'
+          grep -n 'compose-bom\|material3' "$BUILD_FILE"
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # No usar android-actions/setup-android@v3: en el run anterior
+      # fallo mientras actualizaba cmdline-tools/aceptaba licencias.
+      # ubuntu-latest ya incluye Android SDK.
+      - name: Verificar SDK Android preinstalado
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "SDK: $SDK"
+          if [ ! -d "$SDK" ]; then
+            echo 'ERROR: Android SDK no existe en el runner.'
+            exit 1
+          fi
+          ls -la "$SDK/platforms" 2>/dev/null || true
+          ls -la "$SDK/build-tools" 2>/dev/null || true
+          if [ ! -f "$SDK/platforms/android-35/android.jar" ] || [ ! -d "$SDK/build-tools/35.0.0" ]; then
+            echo 'Faltan Android 35 / Build Tools 35.0.0. Intentando instalacion con reintentos.'
+            SDKMANAGER="$(find "$SDK/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -1)"
+            if [ -z "$SDKMANAGER" ]; then
+              echo 'ERROR: No se encuentra sdkmanager.'
+              exit 1
+            fi
+            for attempt in 1 2 3; do
+              echo "Intento SDK $attempt/3"
+              if yes | "$SDKMANAGER" --sdk_root="$SDK" --install 'platforms;android-35' 'build-tools;35.0.0'; then
+                break
+              fi
+              sleep 12
+            done
+          fi
+          test -f "$SDK/platforms/android-35/android.jar"
+          test -d "$SDK/build-tools/35.0.0"
+          echo 'SDK Android listo.'
+
+      - name: Configurar Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Tests, lint y APK (errores reunidos en un registro)
+        shell: bash
+        run: |
+          set -o pipefail
+          cd "$APP_ROOT"
+          gradle --no-daemon --continue --stacktrace \
+            :app:testDebugUnitTest :app:lintDebug :app:assembleDebug \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-completo.log"
+
+      - name: Subir APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PHONK-ZETA-APK-debug
+          path: ${{ env.APP_ROOT }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Subir diagnostico incluso cuando falle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PHONK-ZETA-diagnostico
+          path: |
+            build-completo.log
+            ${{ env.APP_ROOT }}/app/build/reports/**
+            ${{ env.APP_ROOT }}/app/build/test-results/**
+          if-no-files-found: ignore
