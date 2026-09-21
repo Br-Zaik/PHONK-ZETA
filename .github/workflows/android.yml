@@ -23,7 +23,7 @@ jobs:
           if [ -f settings.gradle.kts ]; then
             echo 'APP_ROOT=.' >> "$GITHUB_ENV"
           else
-            ZIP="$(find . -maxdepth 2 -type f -iname '*PHONK-ZETA-source-v0.6.1*.zip' -print -quit)"
+            ZIP="$(find . -maxdepth 2 -type f -iname '*PHONK-ZETA-source-v0.7.0*.zip' -print -quit)"
             if [ -z "$ZIP" ]; then
               ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
             fi
